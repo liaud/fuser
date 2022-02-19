@@ -16,12 +16,12 @@ use crate::ll::{
     INodeNo,
 };
 use libc::c_int;
-use log::{error, warn};
+use log::{error, warn, debug};
 use std::convert::AsRef;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io::IoSlice;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use std::time::SystemTime;
@@ -43,7 +43,7 @@ impl fmt::Debug for Box<dyn ReplySender> {
 /// Generic reply trait
 pub trait Reply {
     /// Create a new reply for the given request
-    fn new<S: ReplySender>(unique: u64, sender: S) -> Self;
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> Self;
 }
 
 ///
@@ -55,14 +55,16 @@ pub(crate) struct ReplyRaw {
     unique: ll::RequestId,
     /// Closure to call for sending the reply
     sender: Option<Box<dyn ReplySender>>,
+    started: Instant,
 }
 
 impl Reply for ReplyRaw {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyRaw {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyRaw {
         let sender = Box::new(sender);
         ReplyRaw {
             unique: ll::RequestId(unique),
             sender: Some(sender),
+            started,
         }
     }
 }
@@ -77,6 +79,9 @@ impl ReplyRaw {
         if let Err(err) = res {
             error!("Failed to send FUSE reply: {}", err);
         }
+
+        let elapsed = self.started.elapsed();
+        debug!("Completed after {:?}", elapsed.as_millis());
     }
     fn send_ll(mut self, response: &ll::Response) {
         self.send_ll_mut(response)
@@ -110,9 +115,9 @@ pub struct ReplyEmpty {
 }
 
 impl Reply for ReplyEmpty {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyEmpty {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyEmpty {
         ReplyEmpty {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -138,9 +143,9 @@ pub struct ReplyData {
 }
 
 impl Reply for ReplyData {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyData {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyData {
         ReplyData {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -166,9 +171,9 @@ pub struct ReplyEntry {
 }
 
 impl Reply for ReplyEntry {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyEntry {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyEntry {
         ReplyEntry {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -200,9 +205,9 @@ pub struct ReplyAttr {
 }
 
 impl Reply for ReplyAttr {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyAttr {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyAttr {
         ReplyAttr {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -231,9 +236,9 @@ pub struct ReplyXTimes {
 
 #[cfg(target_os = "macos")]
 impl Reply for ReplyXTimes {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyXTimes {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyXTimes {
         ReplyXTimes {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -261,9 +266,9 @@ pub struct ReplyOpen {
 }
 
 impl Reply for ReplyOpen {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyOpen {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyOpen {
         ReplyOpen {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -290,9 +295,9 @@ pub struct ReplyWrite {
 }
 
 impl Reply for ReplyWrite {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyWrite {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyWrite {
         ReplyWrite {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -318,9 +323,9 @@ pub struct ReplyStatfs {
 }
 
 impl Reply for ReplyStatfs {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyStatfs {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyStatfs {
         ReplyStatfs {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -359,9 +364,9 @@ pub struct ReplyCreate {
 }
 
 impl Reply for ReplyCreate {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyCreate {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyCreate {
         ReplyCreate {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -393,9 +398,9 @@ pub struct ReplyLock {
 }
 
 impl Reply for ReplyLock {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyLock {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyLock {
         ReplyLock {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -425,9 +430,9 @@ pub struct ReplyBmap {
 }
 
 impl Reply for ReplyBmap {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyBmap {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyBmap {
         ReplyBmap {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -453,9 +458,9 @@ pub struct ReplyIoctl {
 }
 
 impl Reply for ReplyIoctl {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyIoctl {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyIoctl {
         ReplyIoctl {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -484,9 +489,9 @@ pub struct ReplyDirectory {
 
 impl ReplyDirectory {
     /// Creates a new ReplyDirectory with a specified buffer size.
-    pub fn new<S: ReplySender>(unique: u64, sender: S, size: usize) -> ReplyDirectory {
+    pub fn new<S: ReplySender>(unique: u64, started: Instant, sender: S, size: usize) -> ReplyDirectory {
         ReplyDirectory {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
             data: DirEntList::new(size),
         }
     }
@@ -527,9 +532,9 @@ pub struct ReplyDirectoryPlus {
 
 impl ReplyDirectoryPlus {
     /// Creates a new ReplyDirectory with a specified buffer size.
-    pub fn new<S: ReplySender>(unique: u64, sender: S, size: usize) -> ReplyDirectoryPlus {
+    pub fn new<S: ReplySender>(unique: u64, started: Instant, sender: S, size: usize) -> ReplyDirectoryPlus {
         ReplyDirectoryPlus {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
             buf: DirEntPlusList::new(size),
         }
     }
@@ -578,9 +583,9 @@ pub struct ReplyXattr {
 }
 
 impl Reply for ReplyXattr {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyXattr {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyXattr {
         ReplyXattr {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -611,9 +616,9 @@ pub struct ReplyLseek {
 }
 
 impl Reply for ReplyLseek {
-    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyLseek {
+    fn new<S: ReplySender>(unique: u64, started: Instant, sender: S) -> ReplyLseek {
         ReplyLseek {
-            reply: Reply::new(unique, sender),
+            reply: Reply::new(unique, started, sender),
         }
     }
 }
@@ -697,7 +702,7 @@ mod test {
                 0x00, 0x00, 0x12, 0x34, 0x78, 0x56,
             ],
         };
-        let reply: ReplyRaw = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyRaw = Reply::new(0xdeadbeef, Instant::now(), sender);
         reply.send_ll(&ll::Response::new_data(data.as_bytes()));
     }
 
@@ -709,7 +714,7 @@ mod test {
                 0x00, 0x00,
             ],
         };
-        let reply: ReplyRaw = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyRaw = Reply::new(0xdeadbeef, Instant::now(), sender);
         reply.error(66);
     }
 
@@ -721,7 +726,7 @@ mod test {
                 0x00, 0x00,
             ],
         };
-        let reply: ReplyEmpty = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyEmpty = Reply::new(0xdeadbeef, Instant::now(), sender);
         reply.ok();
     }
 
@@ -733,7 +738,7 @@ mod test {
                 0x00, 0x00, 0xde, 0xad, 0xbe, 0xef,
             ],
         };
-        let reply: ReplyData = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyData = Reply::new(0xdeadbeef, Instant::now(), sender);
         reply.data(&[0xde, 0xad, 0xbe, 0xef]);
     }
 
@@ -774,7 +779,7 @@ mod test {
         expected[0] = (expected.len()) as u8;
 
         let sender = AssertSender { expected };
-        let reply: ReplyEntry = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyEntry = Reply::new(0xdeadbeef, Instant::now(), sender);
         let time = UNIX_EPOCH + Duration::new(0x1234, 0x5678);
         let ttl = Duration::new(0x8765, 0x4321);
         let attr = FileAttr {
@@ -831,7 +836,7 @@ mod test {
         expected[0] = expected.len() as u8;
 
         let sender = AssertSender { expected };
-        let reply: ReplyAttr = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyAttr = Reply::new(0xdeadbeef, Instant::now(), sender);
         let time = UNIX_EPOCH + Duration::new(0x1234, 0x5678);
         let ttl = Duration::new(0x8765, 0x4321);
         let attr = FileAttr {
@@ -864,7 +869,7 @@ mod test {
                 0x00, 0x00, 0x00, 0x00, 0x78, 0x56, 0x00, 0x00, 0x78, 0x56, 0x00, 0x00,
             ],
         };
-        let reply: ReplyXTimes = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyXTimes = Reply::new(0xdeadbeef, Instant::now(), sender);
         let time = UNIX_EPOCH + Duration::new(0x1234, 0x5678);
         reply.xtimes(time, time);
     }
@@ -878,7 +883,7 @@ mod test {
                 0x00, 0x00, 0x00, 0x00,
             ],
         };
-        let reply: ReplyOpen = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyOpen = Reply::new(0xdeadbeef, Instant::now(), sender);
         reply.opened(0x1122, 0x33);
     }
 
@@ -890,7 +895,7 @@ mod test {
                 0x00, 0x00, 0x22, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ],
         };
-        let reply: ReplyWrite = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyWrite = Reply::new(0xdeadbeef, Instant::now(), sender);
         reply.written(0x1122);
     }
 
@@ -907,7 +912,7 @@ mod test {
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ],
         };
-        let reply: ReplyStatfs = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyStatfs = Reply::new(0xdeadbeef, Instant::now(), sender);
         reply.statfs(0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88);
     }
 
@@ -954,7 +959,7 @@ mod test {
         expected[0] = (expected.len()) as u8;
 
         let sender = AssertSender { expected };
-        let reply: ReplyCreate = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyCreate = Reply::new(0xdeadbeef, Instant::now(), sender);
         let time = UNIX_EPOCH + Duration::new(0x1234, 0x5678);
         let ttl = Duration::new(0x8765, 0x4321);
         let attr = FileAttr {
@@ -986,7 +991,7 @@ mod test {
                 0x00, 0x00, 0x00, 0x00, 0x33, 0x00, 0x00, 0x00, 0x44, 0x00, 0x00, 0x00,
             ],
         };
-        let reply: ReplyLock = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyLock = Reply::new(0xdeadbeef, Instant::now(), sender);
         reply.locked(0x11, 0x22, 0x33, 0x44);
     }
 
@@ -998,7 +1003,7 @@ mod test {
                 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ],
         };
-        let reply: ReplyBmap = Reply::new(0xdeadbeef, sender);
+        let reply: ReplyBmap = Reply::new(0xdeadbeef, Instant::now(), sender);
         reply.bmap(0x1234);
     }
 
@@ -1014,7 +1019,7 @@ mod test {
                 0x00, 0x00, 0x77, 0x6f, 0x72, 0x6c, 0x64, 0x2e, 0x72, 0x73,
             ],
         };
-        let mut reply = ReplyDirectory::new(0xdeadbeef, sender, 4096);
+        let mut reply = ReplyDirectory::new(0xdeadbeef, Instant::now(), sender, 4096);
         assert!(!reply.add(0xaabb, 1, FileType::Directory, "hello"));
         assert!(!reply.add(0xccdd, 2, FileType::RegularFile, "world.rs"));
         reply.ok();
@@ -1035,7 +1040,7 @@ mod test {
                 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00,
             ],
         };
-        let reply = ReplyXattr::new(0xdeadbeef, sender);
+        let reply = ReplyXattr::new(0xdeadbeef, Instant::now(), sender);
         reply.size(0x12345678);
     }
 
@@ -1047,14 +1052,14 @@ mod test {
                 0x00, 0x00, 0x11, 0x22, 0x33, 0x44,
             ],
         };
-        let reply = ReplyXattr::new(0xdeadbeef, sender);
+        let reply = ReplyXattr::new(0xdeadbeef, Instant::now(), sender);
         reply.data(&[0x11, 0x22, 0x33, 0x44]);
     }
 
     #[test]
     fn async_reply() {
         let (tx, rx) = channel::<()>();
-        let reply: ReplyEmpty = Reply::new(0xdeadbeef, tx);
+        let reply: ReplyEmpty = Reply::new(0xdeadbeef, Instant::now(), tx);
         thread::spawn(move || {
             reply.ok();
         });

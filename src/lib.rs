@@ -74,6 +74,15 @@ const fn default_init_flags(#[allow(unused_variables)] capabilities: u32) -> u32
         if capabilities & FUSE_MAX_PAGES != 0 {
             flags |= FUSE_MAX_PAGES;
         }
+
+        if capabilities & FUSE_BIG_WRITES != 0 {
+            flags |= FUSE_BIG_WRITES;
+        }
+
+        if capabilities & FUSE_PARALLEL_DIROPS != 0 {
+            flags |= FUSE_PARALLEL_DIROPS;
+        }
+
         flags
     }
 }
@@ -990,6 +999,23 @@ pub fn mount2<FS: Filesystem, P: AsRef<Path>>(
 ) -> io::Result<()> {
     check_option_conflicts(options)?;
     Session::new(filesystem, mountpoint.as_ref(), options).and_then(|mut se| se.run())
+}
+
+/// Mount the given filesystem to the given mountpoint. This function will
+/// not return until the filesystem is unmounted.
+///
+/// Request will be read from multiple thread and dispatched to the filesystem.
+pub fn mount2_mt<FS, P: AsRef<Path>>(
+    filesystem: FS,
+    mountpoint: P,
+    thread_count: usize,
+    options: &[MountOption],
+) -> io::Result<()>
+where
+    FS: Filesystem + Send + 'static + Clone,
+{
+    check_option_conflicts(options)?;
+    Session::new(filesystem, mountpoint.as_ref(), options).and_then(|mut se| se.run_mt(thread_count))
 }
 
 /// Mount the given filesystem to the given mountpoint. This function spawns

@@ -8,13 +8,16 @@
 use libc::{EAGAIN, EINTR, ENODEV, ENOENT};
 use log::{info, warn};
 use std::fmt;
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, atomic};
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::thread::{self, JoinHandle};
 use std::{io, ops::DerefMut};
 
 use crate::ll::fuse_abi as abi;
 use crate::request::Request;
-use crate::Filesystem;
+use crate::{Filesystem, FileAttr};
 use crate::MountOption;
 use crate::{channel::Channel, mnt::Mount};
 
@@ -27,11 +30,28 @@ pub const MAX_WRITE_SIZE: usize = 16 * 1024 * 1024;
 /// up to MAX_WRITE_SIZE bytes in a write request, we use that value plus some extra space.
 const BUFFER_SIZE: usize = MAX_WRITE_SIZE + 4096;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum SessionACL {
     All,
     RootAndOwner,
     Owner,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SessionInfo {
+    /// Whether to restrict access to owner, root + owner, or unrestricted
+    /// Used to implement allow_root and auto_unmount
+    pub allowed: SessionACL,
+    /// User that launched the fuser process
+    pub session_owner: u32,
+    /// FUSE protocol major version
+    pub proto_major: Arc<AtomicU32>,
+    /// FUSE protocol minor version
+    pub proto_minor: Arc<AtomicU32>,
+    /// True if the filesystem is initialized (init operation done)
+    pub initialized: Arc<AtomicBool>,
+    /// True if the filesystem was destroyed (destroy operation done)
+    pub destroyed: Arc<AtomicBool>,
 }
 
 /// The session data structure
@@ -45,19 +65,67 @@ pub struct Session<FS: Filesystem> {
     mount: Option<Mount>,
     /// Mount point
     mountpoint: PathBuf,
-    /// Whether to restrict access to owner, root + owner, or unrestricted
-    /// Used to implement allow_root and auto_unmount
-    pub(crate) allowed: SessionACL,
-    /// User that launched the fuser process
-    pub(crate) session_owner: u32,
-    /// FUSE protocol major version
-    pub(crate) proto_major: u32,
-    /// FUSE protocol minor version
-    pub(crate) proto_minor: u32,
-    /// True if the filesystem is initialized (init operation done)
-    pub(crate) initialized: bool,
-    /// True if the filesystem was destroyed (destroy operation done)
-    pub(crate) destroyed: bool,
+
+    info: SessionInfo,
+}
+
+impl<FS> Session<FS>
+    where FS: 'static + Filesystem + Clone + Send
+{
+    /// Run the session loop that receives kernel requests and dispatches them to method
+    /// calls into the filesystem.
+    pub fn run_mt(&mut self, thread_count: usize) -> io::Result<()> {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let mut runners = Vec::with_capacity(thread_count);
+
+        for _ in 0..thread_count {
+            let ch = self.ch.clone();
+            let stopped = stopped.clone();
+            let session_info = self.info.clone();
+            let mut fs = self.filesystem.clone();
+
+            runners.push(thread::spawn(move || {
+                // Buffer for receiving requests from the kernel. Only one is allocated and
+                // it is reused immediately after dispatching to conserve memory and allocations.
+                let mut buffer = vec![0; BUFFER_SIZE];
+                let buf = aligned_sub_buf(
+                    buffer.deref_mut(),
+                    std::mem::align_of::<abi::fuse_in_header>(),
+                );
+
+                loop {
+                    let stopped = stopped.load(atomic::Ordering::SeqCst);
+                    if stopped {
+                        break;
+                    }
+
+                    match ch.receive(buf) {
+                        Ok(size) => match Request::new(ch.sender(), &buf[..size]) {
+                            Some(req) => req.dispatch(&mut fs, &session_info),
+                            None => break,
+                        },
+                        Err(err) => match err.raw_os_error() {
+                            // Operation interrupted. Accordingly to FUSE, this is safe to retry
+                            Some(ENOENT) => continue,
+                            // Interrupted system call, retry
+                            Some(EINTR) => continue,
+                            // Explicitly try again
+                            Some(EAGAIN) => continue,
+                            // Filesystem was unmounted, quit the loop
+                            Some(ENODEV) => break,
+                            // Unhandled error
+                            _ => return Err(err),
+                        },
+                    }
+                }
+                stopped.store(true, atomic::Ordering::SeqCst);
+
+                Ok(())
+            }))
+        }
+
+        runners.into_iter().map(|handle| handle.join().unwrap()).collect()
+    }
 }
 
 impl<FS: Filesystem> Session<FS> {
@@ -97,12 +165,14 @@ impl<FS: Filesystem> Session<FS> {
             ch,
             mount: Some(mount),
             mountpoint: mountpoint.to_owned(),
-            allowed,
-            session_owner: unsafe { libc::geteuid() },
-            proto_major: 0,
-            proto_minor: 0,
-            initialized: false,
-            destroyed: false,
+            info: SessionInfo {
+                allowed,
+                session_owner: unsafe { libc::geteuid() },
+                proto_major: Arc::new(AtomicU32::new(0)),
+                proto_minor: Arc::new(AtomicU32::new(0)),
+                initialized: Arc::new(AtomicBool::new(false)),
+                destroyed: Arc::new(AtomicBool::new(false))
+            }
         })
     }
 
@@ -129,7 +199,7 @@ impl<FS: Filesystem> Session<FS> {
             match self.ch.receive(buf) {
                 Ok(size) => match Request::new(self.ch.sender(), &buf[..size]) {
                     // Dispatch request
-                    Some(req) => req.dispatch(self),
+                    Some(req) => req.dispatch(&mut self.filesystem, &self.info),
                     // Quit loop on illegal request
                     None => break,
                 },
@@ -174,9 +244,10 @@ impl<FS: 'static + Filesystem + Send> Session<FS> {
 
 impl<FS: Filesystem> Drop for Session<FS> {
     fn drop(&mut self) {
-        if !self.destroyed {
+        let destroyed = self.info.destroyed.load(atomic::Ordering::SeqCst);
+        if !destroyed {
             self.filesystem.destroy();
-            self.destroyed = true;
+            self.info.destroyed.store(true, atomic::Ordering::SeqCst);
         }
         info!("Unmounted {}", self.mountpoint().display());
     }
