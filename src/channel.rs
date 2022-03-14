@@ -1,4 +1,4 @@
-use std::{fs::File, io, os::unix::prelude::AsRawFd, sync::Arc};
+use std::{fs::File, io, os::unix::prelude::{AsRawFd, FromRawFd}, sync::Arc, ffi::OsStr};
 
 use libc::{c_int, c_void, size_t};
 
@@ -39,6 +39,34 @@ impl Channel {
         // Since write/writev syscalls are threadsafe, we can simply create
         // a sender by using the same file and use it in other threads.
         ChannelSender(self.0.clone())
+    }
+
+    pub fn duplicate(&self) -> io::Result<Channel> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let master_fd = self.0.as_raw_fd();
+
+        unsafe {
+            let dev = std::ffi::CString::new("/dev/fuse").unwrap();
+            let fd =
+                libc::open(dev.as_bytes_with_nul().as_ptr() as *const libc::c_char,
+                           libc::O_RDWR);
+            if fd == -1 {
+                log::error!("Failed to open fuse fd");
+                return Err(io::Error::last_os_error());
+            }
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+
+            let ioc_clone = 0x_80_04_e5_00;
+            let ctl_res = libc::ioctl(fd, ioc_clone, &master_fd);
+            if ctl_res == -1 {
+                libc::close(fd);
+                return Err(io::Error::last_os_error());
+            }
+
+            let file = Arc::new(File::from_raw_fd(fd));
+            Ok(Channel(file))
+        }
     }
 }
 

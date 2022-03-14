@@ -79,10 +79,17 @@ impl<FS> Session<FS>
         let mut runners = Vec::with_capacity(thread_count);
 
         for _ in 0..thread_count {
-            let ch = self.ch.clone();
             let stopped = stopped.clone();
             let session_info = self.info.clone();
             let mut fs = self.filesystem.clone();
+
+            let ch = match self.ch.duplicate() {
+                Ok(ch) => ch,
+                Err(error) => {
+                    stopped.store(true, atomic::Ordering::SeqCst);
+                    return Err(error);
+                }
+            };
 
             runners.push(thread::spawn(move || {
                 // Buffer for receiving requests from the kernel. Only one is allocated and
